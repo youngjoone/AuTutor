@@ -27,7 +27,7 @@ public enum StudyState: Equatable {
 
 @MainActor public final class StudyController: ObservableObject {
     @Published public private(set) var state: StudyState = .idle
-    @Published public private(set) var result: AnalysisResult?
+    @Published public private(set) var result: AnalysisBatch?
     /// Hotkey to speech enqueue; hardware audio onset is not measured here.
     @Published public private(set) var latency: TimeInterval?
     @Published public private(set) var isBusy = false
@@ -35,12 +35,12 @@ public enum StudyState: Equatable {
     private let capture: ScreenCapturing
     private let analyzer: ProblemAnalyzing
     private let speaker: AnswerSpeaking
-    private let settings: () throws -> GeminiSettings
+    private let settings: () throws -> OpenAISettings
     private var task: Task<Void, Never>?
     private var runID: UUID?
 
     public init(capture: ScreenCapturing, analyzer: ProblemAnalyzing, speaker: AnswerSpeaking,
-                settings: @escaping () throws -> GeminiSettings) {
+                settings: @escaping () throws -> OpenAISettings) {
         self.capture = capture
         self.analyzer = analyzer
         self.speaker = speaker

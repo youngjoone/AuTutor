@@ -29,7 +29,7 @@ final class ControllerTests: XCTestCase {
     @MainActor func testFailureStatusesReadExactReturnedMessages() async {
         for (status, text) in [(AnalysisStatus.noProblem, "문제를 인식하지 못했습니다."), (.uncertain, "정답을 판단하기 어렵습니다.")] {
             let fixture = Fixture()
-            fixture.analyzer.result = AnalysisResult(status: status, answer: nil, speechText: text)
+            fixture.analyzer.result = AnalysisBatch(results: [AnalysisResult(status: status, answer: nil, speechText: text)])
             fixture.controller.start()
             await eventually { fixture.speaker.spoken.count == 1 }
             XCTAssertEqual(fixture.speaker.spoken, [text])
@@ -56,7 +56,7 @@ final class ControllerTests: XCTestCase {
 
     @MainActor func testInvalidResultAndNetworkErrorsDoNotSpeak() async {
         let fixture = Fixture()
-        fixture.analyzer.result = AnalysisResult(status: .solved, answer: "3번", speechText: "정답은 3번입니다.")
+        fixture.analyzer.result = AnalysisBatch(results: [AnalysisResult(status: .solved, answer: "3번", speechText: "정답은 3번입니다.")])
         fixture.controller.start()
         await eventually { !fixture.controller.isBusy }
         XCTAssertEqual(fixture.controller.state, .failed(StudyError.invalidResponse.localizedDescription))
@@ -89,13 +89,13 @@ final class ControllerTests: XCTestCase {
         let old = fixture.analyzer.continuation
         fixture.controller.cancel()
         fixture.analyzer.suspended = false
-        fixture.analyzer.result = AnalysisResult(status: .solved, answer: "42", speechText: "42")
+        fixture.analyzer.result = AnalysisBatch(results: [AnalysisResult(status: .solved, answer: "42", speechText: "42")])
         fixture.controller.start()
         await eventually { fixture.speaker.spoken == ["42"] }
-        old?.resume(returning: AnalysisResult(status: .solved, answer: "3번", speechText: "3번"))
+        old?.resume(returning: AnalysisBatch(results: [AnalysisResult(status: .solved, answer: "3번", speechText: "3번")]))
         for _ in 0..<20 { await Task.yield() }
         XCTAssertEqual(fixture.speaker.spoken, ["42"])
-        XCTAssertEqual(fixture.controller.result?.answer, "42")
+        XCTAssertEqual(fixture.controller.result?.results.first?.answer, "42")
         XCTAssertEqual(fixture.controller.state, .speaking)
     }
 
@@ -112,6 +112,35 @@ final class ControllerTests: XCTestCase {
         XCTAssertEqual(fixture.controller.state, .speaking)
         fixture.speaker.finish?()
         XCTAssertEqual(fixture.controller.state, .finished)
+    }
+
+    @MainActor func testMultipleAnswersPreserveOrderAndUncertaintyWithoutExtraSpeech() async {
+        let fixture = Fixture()
+        fixture.analyzer.result = AnalysisBatch(results: [
+            AnalysisResult(status: .solved, answer: "3번", speechText: "3번"),
+            AnalysisResult(status: .uncertain, answer: nil, speechText: "정답을 판단하기 어렵습니다."),
+            AnalysisResult(status: .solved, answer: "O", speechText: "O"),
+            AnalysisResult(status: .solved, answer: "42", speechText: "42")
+        ])
+        fixture.controller.start()
+        await eventually { !fixture.speaker.spoken.isEmpty }
+        XCTAssertEqual(fixture.speaker.spoken, ["3번, 정답을 판단하기 어렵습니다., O, 42"])
+        XCTAssertEqual(fixture.analyzer.calls, 1)
+        XCTAssertTrue(fixture.controller.isBusy)
+        fixture.speaker.finish?()
+        XCTAssertEqual(fixture.controller.state, .finished)
+    }
+
+    @MainActor func testInvalidLaterAnswerPreventsPartialSpeech() async {
+        let fixture = Fixture()
+        fixture.analyzer.result = AnalysisBatch(results: [
+            AnalysisResult(status: .solved, answer: "3번", speechText: "3번"),
+            AnalysisResult(status: .solved, answer: "42", speechText: "정답은 42입니다.")
+        ])
+        fixture.controller.start()
+        await eventually { !fixture.controller.isBusy }
+        XCTAssertTrue(fixture.speaker.spoken.isEmpty)
+        XCTAssertEqual(fixture.controller.state, .failed(StudyError.invalidResponse.localizedDescription))
     }
 
     @MainActor private func eventually(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
@@ -149,10 +178,10 @@ final class ControllerTests: XCTestCase {
 @MainActor private final class FakeAnalyzer: ProblemAnalyzing {
     var calls = 0
     var error: Error?
-    var result = AnalysisResult(status: .solved, answer: "3번", speechText: "3번")
+    var result = AnalysisBatch(results: [AnalysisResult(status: .solved, answer: "3번", speechText: "3번")])
     var suspended = false
-    var continuation: CheckedContinuation<AnalysisResult, Never>?
-    func analyze(jpeg: Data, settings: GeminiSettings) async throws -> AnalysisResult {
+    var continuation: CheckedContinuation<AnalysisBatch, Never>?
+    func analyze(jpeg: Data, settings: OpenAISettings) async throws -> AnalysisBatch {
         calls += 1
         if let error { throw error }
         if suspended { return await withCheckedContinuation { continuation = $0 } }

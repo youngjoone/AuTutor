@@ -15,7 +15,7 @@ import StudyCore
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settings = SettingsStore()
-    private lazy var controller = StudyController(capture: ScreenCapture(), analyzer: GeminiClient(), speaker: SpeechService()) {
+    private lazy var controller = StudyController(capture: ScreenCapture(), analyzer: OpenAIClient(), speaker: SpeechService()) {
         [settings] in settings.snapshot()
     }
     private var statusItem: NSStatusItem!
@@ -25,6 +25,7 @@ import StudyCore
     private var hotKeyError: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "graduationcap", accessibilityDescription: "AuTutor")
         hotKey = GlobalHotKey { [weak self] in
@@ -35,7 +36,39 @@ import StudyCore
             DispatchQueue.main.async { self?.updateMenu() }
         }.store(in: &subscriptions)
         updateMenu()
-        if !settings.hasSavedKey || hotKeyError != nil { showSettings() }
+        showSettings()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showSettings()
+        return true
+    }
+
+    private func installMainMenu() {
+        // Text fields receive standard editing shortcuts through the responder chain,
+        // even when this accessory app has no visible application menu bar.
+        let mainMenu = NSMenu()
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu(title: "AuTutor")
+        applicationMenu.addItem(withTitle: "설정 및 상태…", action: #selector(showSettings), keyEquivalent: ",").target = self
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(withTitle: "AuTutor 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "편집")
+        editMenu.addItem(withTitle: "실행 취소", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "다시 실행", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "잘라내기", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "복사", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "붙여넣기", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "전체 선택", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+        NSApp.mainMenu = mainMenu
     }
 
     private func updateMenu() {
@@ -100,7 +133,7 @@ private struct SettingsView: View {
                 Image(systemName: "graduationcap.fill").font(.system(size: 34)).foregroundStyle(.indigo)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("AuTutor").font(.largeTitle.bold())
-                    Text("화면 속 문제, 정답만 짧게.").foregroundStyle(.secondary)
+                    Text("화면 속 모든 문제, 위에서 아래로 정답만.").foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text("⌘ ⇧ 8").font(.title3.monospaced()).padding(10).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
@@ -123,16 +156,28 @@ private struct SettingsView: View {
             }
             if let hotKeyError { Text(hotKeyError).foregroundStyle(.red).font(.callout) }
             VStack(alignment: .leading, spacing: 10) {
-                Text("Gemini 연결").font(.headline)
-                SecureField(settings.hasSavedKey ? "API 키 저장됨 · 변경할 때만 입력" : "Gemini API 키", text: $settings.apiKey)
-                    .textFieldStyle(.roundedBorder)
+                Text("OpenAI 연결").font(.headline)
+                HStack {
+                    SecureField(settings.hasSavedKey ? "API 키 저장됨 · 변경할 때만 입력" : "OpenAI API 키", text: $settings.apiKey)
+                        .textFieldStyle(.roundedBorder)
+                    Button("붙여넣기") {
+                        if let text = NSPasteboard.general.string(forType: .string) {
+                            settings.apiKey = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    }
+                    .help("클립보드의 API 키를 입력합니다. 저장 버튼을 눌러야 저장됩니다.")
+                }
                 HStack {
                     Text("모델").foregroundStyle(.secondary)
                     TextField("모델 ID", text: $settings.model).textFieldStyle(.roundedBorder)
                 }
                 HStack {
-                    Link("API 키 발급", destination: URL(string: "https://aistudio.google.com/apikey")!)
+                    Link("API 키 발급", destination: URL(string: "https://platform.openai.com/api-keys")!)
+                    Link("API 결제", destination: URL(string: "https://platform.openai.com/settings/organization/billing/overview")!)
                     Spacer()
+                    Button(settings.isCheckingConnection ? "확인 중…" : "연결 확인") { settings.checkConnection() }
+                        .disabled(settings.isCheckingConnection || controller.isBusy || !settings.hasSavedKey)
+                        .help("저장된 키와 모델로 작은 테스트 문제를 전송합니다. 현재 화면은 캡처하지 않습니다.")
                     if settings.hasSavedKey { Button("키 삭제") { settings.removeKey() } }
                     Button("저장") { settings.save() }.buttonStyle(.borderedProminent)
                 }
@@ -152,7 +197,7 @@ private struct SettingsView: View {
                 Text("권한을 변경한 후에는 앱을 종료하고 다시 실행해 주세요.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("단축키를 누르면 해당 모니터 전체 이미지가 Gemini로 전송됩니다. 캡처는 파일로 저장하지 않으며, API 키는 macOS 키체인에 보관합니다.")
+            Text("단축키를 누르면 해당 모니터 전체 이미지가 OpenAI로 전송됩니다. 캡처는 파일로 저장하지 않으며, API 키는 macOS 키체인에 보관합니다.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
